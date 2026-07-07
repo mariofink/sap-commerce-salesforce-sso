@@ -298,5 +298,7 @@
     <extension name='xyformsservices' />
     <extension name='xyformsstorefrontcommons' />
     <extension name='xyformsweb' />
+    <!-- Salesforce SSO prototype: SAML 2.0 Service Provider -->
+    <extension name='samlsinglesignon' />
   </extensions>
 </hybrisconfig>
