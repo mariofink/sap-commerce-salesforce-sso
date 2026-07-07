@@ -1,0 +1,86 @@
+# ============================================================================
+# .gitignore for SAP Commerce (Hybris) project
+#
+# Strategy: track ONLY your own custom extensions (hybris/bin/custom) and
+# hybris/config. Everything SAP-provided (platform, modules, installer,
+# licenses) and everything generated/runtime is ignored.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# SAP-provided suite (downloaded/unzipped, not your source)
+# ----------------------------------------------------------------------------
+/hybris/bin/platform/
+/hybris/bin/modules/
+/installer/
+/licenses/
+/build-tools/
+/hybris-sbg/
+SIGNATURE.SMF
+
+# ----------------------------------------------------------------------------
+# Runtime data, logs, temp (never commit these)
+# ----------------------------------------------------------------------------
+/hybris/data/
+/hybris/log/
+/hybris/temp/
+/hybris/roles/
+
+# ----------------------------------------------------------------------------
+# Generated / build output inside custom extensions
+# ----------------------------------------------------------------------------
+**/gensrc/
+**/classes/
+**/testclasses/
+**/eclipsebin/
+**/build/
+**/webroot/WEB-INF/classes/
+**/*.jar
+**/*.war
+**/*.ear
+**/*.class
+
+# Keep hand-written resources even though many *.jar are ignored above:
+!**/lib/**/*.jar
+
+# ----------------------------------------------------------------------------
+# Secrets & local/machine-specific config
+# (commit a sanitized *.template instead if you need a shared baseline)
+# ----------------------------------------------------------------------------
+/hybris/config/local.properties
+/hybris/config/licence/
+/hybris/config/backup/
+/hybris/config/customize/
+**/*.key
+**/*.pem
+**/*.p12
+**/*.jks
+
+# ----------------------------------------------------------------------------
+# IDE & editor files
+# ----------------------------------------------------------------------------
+/.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+.factorypath
+.springBeans
+.apt_generated/
+*.launch
+.vscode/
+
+# ----------------------------------------------------------------------------
+# OS files
+# ----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------------------------------------------
+# Frontend build artifacts (addons / JS storefronts)
+# ----------------------------------------------------------------------------
+**/node_modules/
+**/npm-debug.log
+**/.angular/
+**/dist/

@@ -1,0 +1,7 @@
+ext {
+	libraries = []
+	mavenCompilerRelease = "21"
+}
+libraries << "ro.isdc.wro4j:wro4j-core:2.1.1"
+libraries << "org.mozilla:rhino-all:1.8.1"
+libraries << "org.glassfish.web:jakarta.servlet.jsp.jstl:3.0.1"
