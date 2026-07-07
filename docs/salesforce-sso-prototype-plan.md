@@ -87,8 +87,12 @@ imported Salesforce certificate.
    - SP keystore alias + password.
 2. Load the Salesforce IdP cert so Commerce can verify the signature
    (`sso.metadata.verification.enabled=true`).
-3. Export **SP metadata** from Commerce and import it into the Salesforce
-   Connected App to complete the trust circle.
+3. **Trust the SP in Salesforce.** Salesforce does *not* ingest an SP metadata
+   XML file — you configure the SP by entering values manually. From the Commerce
+   SP metadata, Salesforce needs: **Entity Id** and **ACS URL** (both entered in
+   the Connected App). The SP **X.509 certificate** is only needed if you enable
+   **Verify Request Signatures** or **Encrypt SAML Response** — for this prototype
+   leave both **off**, so nothing extra is imported.
 
 ### Phase 4 — User mapping & JIT provisioning (B2BCustomer)
 1. Extend the SAML user-mapping logic so a validated assertion resolves to a
