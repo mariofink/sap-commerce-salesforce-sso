@@ -94,16 +94,31 @@ imported Salesforce certificate.
    **Verify Request Signatures** or **Encrypt SAML Response** — for this prototype
    leave both **off**, so nothing extra is imported.
 
-### Phase 4 — User mapping & JIT provisioning (B2BCustomer)
-1. Extend the SAML user-mapping logic so a validated assertion resolves to a
-   Commerce `B2BCustomer`:
-   - Match by email (UID).
-   - If absent, **create** the `B2BCustomer`, set name from assertion attributes,
-     and assign to a customer/B2B unit group.
-2. Wire the authenticated principal into the storefront's Spring Security context
-   so the accelerator treats the user as logged in.
-   (Reuse the `sso.mapping.*` pattern — extend beyond the default ASM-agent mapping
-   to storefront B2B customers.)
+### Phase 4 — User mapping & JIT provisioning (B2BCustomer)  ✅ config applied
+**No Java code needed** — the OOTB `DefaultSSOService` already JIT-creates any user
+type from configuration. Key facts (verified by decompiling the extension):
+- `DefaultSAMLService` reads uid/name/roles from SAML **attributes only** (no NameID
+  fallback): `sso.userid.attribute.key`, `sso.firstname/lastname.attribute.key`,
+  `sso.usergroup.attribute.key` (default `usergroup`).
+- `DefaultSSOService.getOrCreateSSOUser(uid, name, roles)` looks up by uid; if absent
+  creates the type from `sso.mapping.<role>.usertype` and assigns
+  `sso.mapping.<role>.groups`. Requires uid **and** roles non-empty.
+
+**Applied config (`local.properties`):**
+```properties
+sso.userid.attribute.key=email
+sso.firstname.attribute.key=firstName
+sso.lastname.attribute.key=lastName
+sso.usergroup.attribute.key=usergroup
+sso.mapping.b2bcustomer.usertype=B2BCustomer
+sso.mapping.b2bcustomer.groups=b2bcustomergroup
+```
+Salesforce auto-sends `email`, `firstName`, `lastName`; you only add one custom
+attribute `usergroup=b2bcustomer` (see values-and-checklist doc).
+
+**Optional hardening (not required for login):** assign the JIT `B2BCustomer` a
+default **B2BUnit** so full B2B storefront features (checkout, org management) work;
+OOTB B2B customers belong to a unit (e.g. "Custom Retail") plus `b2bcustomergroup`.
 
 ### Phase 5 — Storefront integration (SSO-only)
 1. Replace/redirect the storefront login page so it triggers the SP-initiated SAML

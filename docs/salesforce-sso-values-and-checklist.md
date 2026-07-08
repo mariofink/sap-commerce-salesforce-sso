@@ -68,23 +68,27 @@ for older IdP configs — prefer the modern ones above):
 | **IdP Login URL** | from Salesforce Identity Provider page |
 | **IdP Certificate** | download from Salesforce Identity Provider page |
 
-**Custom SAML attributes to send in the assertion** (used for JIT `B2BCustomer`
-creation in Phase 4):
+**SAML attributes** (read by `DefaultSAMLService` — all values come from **attributes**,
+NOT the NameID):
 
-> **Important — Salesforce reserved keys:** `Email`, `FirstName`, `LastName`,
-> `Username`, `FederationIdentifier`, `UserType`, etc. are **reserved** and cannot
-> be used as *custom* attribute keys (you'll get a "Reserved attribute key" error).
-> - **Email is delivered via the NameID/Subject** (format `emailAddress`) — do **not**
->   add a custom `email` attribute. Commerce reads the NameID as `B2BCustomer.uid`.
-> - For names/groups, use **non-reserved** custom keys (e.g. `givenName`, `surname`,
->   `spGroups`) and map them on the Commerce side in Phase 4.
+> **✅ Verified against a real Salesforce assertion:** Salesforce **automatically**
+> emits these STANDARD attributes — no custom config needed: `userId` (SF internal
+> id, *not* email), `username` (=email), `email`, `firstName`, `lastName`,
+> `is_portal_user`, `amr`. This is also *why* `email`/`userId` are rejected as custom
+> keys — they already exist. So reuse the standard `email`/`firstName`/`lastName`.
+> There is **no group attribute** by default, so add **one custom** attribute
+> `usergroup` (not reserved) with a static value to drive the role→type mapping.
 
-| Attribute (SAML assertion) | Salesforce value | Commerce use |
-|----------------------------|------------------|--------------|
-| **NameID / Subject** (not a custom attr) | user's email (`$User.Email` / Federation Id) | `B2BCustomer.uid` (login id) |
-| `givenName` | `$User.FirstName` | customer first name |
-| `surname` | `$User.LastName` | customer last name |
-| `spGroups` | e.g. `$User.UserRole` or a static value | B2B unit / user group mapping |
+| SAML attribute (in assertion) | Source | Commerce property | Commerce use |
+|---|---|---|---|
+| `email` (auto) | user's email | `sso.userid.attribute.key=email` | `B2BCustomer.uid` (login id) |
+| `firstName` (auto) | `$User.FirstName` | `sso.firstname.attribute.key=firstName` | first name |
+| `lastName` (auto) | `$User.LastName` | `sso.lastname.attribute.key=lastName` | last name |
+| `usergroup` (**add as custom**) | static `"b2bcustomer"` | `sso.usergroup.attribute.key=usergroup` | role → mapping key (**required, non-empty**) |
+
+The `usergroup` value (`b2bcustomer`) selects the mapping
+`sso.mapping.b2bcustomer.usertype=B2BCustomer` + `.groups=b2bcustomergroup`, which
+sets the JIT-created user's **type** and **Commerce user groups**.
 
 ---
 
@@ -122,9 +126,10 @@ Perform in the Salesforce **sandbox** org (Setup):
   - [ ] **Subject Type** = `Username` or **Custom Attribute → email**
         (must resolve to the user's email; Name ID format `emailAddress`).
   - [ ] **Name ID Format** = `emailAddress`.
-  - [ ] Under **Custom Attributes**, add only **non-reserved** keys: `givenName`,
-        `surname`, `spGroups` mapped to `$User.*` (see §3). Do **not** add `email`
-        (reserved) — email is delivered via the NameID/Subject.
+  - [ ] **Custom Attributes:** Salesforce already sends `email`, `firstName`,
+        `lastName` automatically — do NOT re-add them (reserved). Add only **one**
+        custom attribute for the group:
+        - `usergroup` = `"b2bcustomer"`  (static string, in quotes) → selects the mapping
   - [ ] (Optional but recommended) **Sign SAML Response / Assertion** = enabled,
         so Commerce can verify the signature with the IdP cert.
 - [ ] **Save**, then **Manage → Profiles / Permission Sets**: assign the test
@@ -168,6 +173,25 @@ sso.metadata.verification.enabled=false
 # --- Logout redirect target ---
 samlsinglesignon.logout.redirect.url=/logout.jsp
 ```
+
+### Phase 4 additions (attribute mapping + JIT B2BCustomer) — already applied
+
+```properties
+# SAML attribute keys the IdP must send (non-reserved keys). No NameID fallback!
+sso.userid.attribute.key=email
+sso.firstname.attribute.key=firstName
+sso.lastname.attribute.key=lastName
+sso.usergroup.attribute.key=usergroup
+
+# Role -> user type + Commerce groups. Salesforce sends usergroup=b2bcustomer.
+sso.mapping.b2bcustomer.usertype=B2BCustomer
+sso.mapping.b2bcustomer.groups=b2bcustomergroup
+```
+
+`DefaultSSOService.getOrCreateSSOUser(uid, name, roles)` then: looks up by uid via
+`UserService.getUserForUID`; if absent, `modelService.create("B2BCustomer")`, sets
+uid+name+password, assigns groups `[b2bcustomergroup]`, and saves. Existing users are
+reused (groups re-applied). Both `uid` and `roles` must be non-empty or it throws.
 
 **IdP metadata file placement:**
 ```
