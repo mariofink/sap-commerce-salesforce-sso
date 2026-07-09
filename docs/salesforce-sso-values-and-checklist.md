@@ -174,7 +174,7 @@ sso.metadata.verification.enabled=false
 samlsinglesignon.logout.redirect.url=/logout.jsp
 ```
 
-### Phase 4 additions (attribute mapping + JIT B2BCustomer) — already applied
+### Phase 4 additions (attribute mapping + JIT B2BCustomer) — COMPLETED ✅
 
 ```properties
 # SAML attribute keys the IdP must send (non-reserved keys). No NameID fallback!
@@ -184,14 +184,16 @@ sso.lastname.attribute.key=lastName
 sso.usergroup.attribute.key=usergroup
 
 # Role -> user type + Commerce groups. Salesforce sends usergroup=b2bcustomer.
+# NOTE: 'Rustic' (an existing B2BUnit) is included so the mandatory B2BUnit
+# membership validation passes — see gotcha #1 below.
 sso.mapping.b2bcustomer.usertype=B2BCustomer
-sso.mapping.b2bcustomer.groups=b2bcustomergroup
+sso.mapping.b2bcustomer.groups=b2bcustomergroup,Rustic
 ```
 
 `DefaultSSOService.getOrCreateSSOUser(uid, name, roles)` then: looks up by uid via
 `UserService.getUserForUID`; if absent, `modelService.create("B2BCustomer")`, sets
-uid+name+password, assigns groups `[b2bcustomergroup]`, and saves. Existing users are
-reused (groups re-applied). Both `uid` and `roles` must be non-empty or it throws.
+uid+name+password, assigns groups, and saves. Existing users are reused (groups
+re-applied). Both `uid` and `roles` must be non-empty or it throws.
 
 **IdP metadata file placement:**
 ```
@@ -202,6 +204,122 @@ Download this from Salesforce (Identity Provider page → Download Metadata) in 
 > If you prefer to keep `sso.metadata.verification.enabled=true`, you must import the
 > Salesforce metadata-signing certificate into `samlKeystore.jks` so the file
 > signature validates. For a prototype, disabling it is simpler.
+
+---
+
+## 5b. Phase 4 — full completion summary (what it actually took)
+
+Getting a `B2BCustomer` created just-in-time from a successful Salesforce SAML
+assertion required clearing **five** blockers, in the order the flow hits them.
+End state: logging in as `mario.fink@goodyear.com` auto-creates a `B2BCustomer`.
+
+### The five gotchas (in flow order)
+
+1. **`AuthnFailed` from Salesforce** — the external/connected app had **no profile
+   assigned**, so Salesforce refused to issue an assertion. Fix: assign the user's
+   profile to the app in Salesforce. Symptom in SAML-tracer:
+   `StatusCode Value=...status:AuthnFailed` with no assertion/attributes.
+
+2. **Reserved attribute keys** — Salesforce rejects `email`/`userId` as *custom*
+   attribute keys ("Reserved attribute key"). Salesforce already sends `email`,
+   `firstName`, `lastName`, `username`, `userId` as **standard** attributes, so we
+   simply point the `sso.*.attribute.key` properties at those standard names and add
+   one genuinely custom attribute `usergroup`. (`sso.userid.attribute.key=email`,
+   because `DefaultSAMLService` reads the uid from a SAML *attribute* by key and does
+   **not** fall back to the NameID.)
+
+3. **Assertion `Issuer` ≠ metadata `entityID` → "Invalid signature / Failed to
+   establish trust".** The Salesforce app had an *Issuer override* of
+   `https://localhost:9002`, but the IdP metadata `entityID` was the my.domain URL
+   (`https://brave-otter-...my.salesforce.com`). OpenSaml selects the IdP signing
+   cert by matching the assertion Issuer to a metadata `entityID`; a mismatch means
+   no cert is found and trust fails. Fix: remove/align the Issuer override in
+   Salesforce so the assertion Issuer equals the metadata `entityID`.
+
+4. **`SessionIndex` NPE → "Authentication failed … since null".** OOTB
+   `SamlObjectsFactory.adjustPrincipalWithSessionIndex` does
+   `List.of(statement.getSessionIndex())`, which NPEs (with a null message) when the
+   assertion carries **no** `SessionIndex`. Salesforce omits `SessionIndex` unless
+   **Single Logout** / "Include Session Index in SAML Assertion" is enabled on the
+   app. Fix: enable that toggle in Salesforce. (This is a platform bug we worked
+   around via IdP config rather than patching the extension.)
+
+5. **`MissingMandatoryAttributesException: [email]` on save.** `B2BCustomer.email` is
+   a **mandatory** attribute (`MandatoryAttributesValidator`), but
+   `DefaultSSOService.createNewUser` only sets `uid`, `name`, `password`, and groups —
+   it never sets `email`. So the JIT save always failed *after* a fully successful
+   SAML authentication. **This is the blocker that required custom code** (see below).
+
+Also worth recording (not an error, but required): a `B2BCustomer` must belong to a
+**B2BUnit** (`B2BCustomerModelValidateInterceptor`, key
+`error.b2bcustomer.b2bunit.missing`). `B2BUnitService.getParent()` looks for a
+B2BUnit among the customer's groups, so we add the existing B2BUnit uid **`Rustic`**
+to `sso.mapping.b2bcustomer.groups`. Without it the save fails even with email set.
+
+### The custom extension `sfssocustom` — and why it was necessary
+
+The only thing that could not be solved by configuration or Salesforce settings was
+setting the mandatory `email` on the JIT-created `B2BCustomer`. `DefaultSSOService`
+is not configurable for extra attributes, so we need a **model `PrepareInterceptor`**
+on `B2BCustomer` that defaults `email = uid` (the uid *is* the email/login):
+
+```java
+// sfssocustom/src/com/sap/sfssocustom/interceptor/B2BCustomerEmailPrepareInterceptor.java
+public class B2BCustomerEmailPrepareInterceptor implements PrepareInterceptor<B2BCustomerModel> {
+    public void onPrepare(B2BCustomerModel c, InterceptorContext ctx) {
+        if (StringUtils.isBlank(c.getEmail()) && StringUtils.isNotBlank(c.getUid())) {
+            c.setEmail(c.getUid());
+        }
+    }
+}
+```
+
+**Why a brand-new extension instead of reusing `yb2bacceleratorstorefront`:**
+
+- A **model interceptor must be registered in the platform-wide (global) Spring
+  application context** so it fires on **every** `modelService.save(B2BCustomer)`
+  regardless of which webapp/thread triggers it.
+- The JIT save happens **inside the `samlsinglesignon` webapp**, *not* the storefront
+  webapp.
+- `yb2bacceleratorstorefront` is effectively **web-only**: its Spring config lives in
+  `web/webroot/WEB-INF/...-web-spring.xml`, a **web application context scoped to the
+  storefront webapp**. A bean placed there would never run during the save that
+  occurs in the `samlsinglesignon` webapp — so the interceptor simply wouldn't fire.
+- To reuse it we'd have to bolt a core module + a global
+  `resources/yb2bacceleratorstorefront-spring.xml` onto an accelerator-generated
+  extension, which is messier than a small dedicated extension.
+
+So `sfssocustom` provides exactly what's needed: a **core module** whose
+`resources/sfssocustom-spring.xml` is the **global** context, the correct home for a
+platform-level model interceptor. It's also decoupled from the storefront web layer
+and reusable by any webapp.
+
+### Files/config that make up `sfssocustom`
+
+| File | Purpose |
+|---|---|
+| `src/com/sap/sfssocustom/interceptor/B2BCustomerEmailPrepareInterceptor.java` | Sets `email = uid` when blank |
+| `resources/sfssocustom-spring.xml` | Registers the interceptor **bean** + an `InterceptorMapping` (`typeCode=B2BCustomer`) in the global context |
+| `extensioninfo.xml` | `<requires-extension name="b2bcommerce"/>` so `B2BCustomerModel` is on the classpath |
+| `config/localextensions.xml` | `<extension name='sfssocustom' />` added after `samlsinglesignon` |
+
+Build: `ant clean all` (no `updatesystem` needed — no new item types). Then restart.
+The interceptor requires no data model change, so no system update.
+
+### How Phase 4 success was verified
+
+- SAML-tracer showed `StatusCode ...status:Success` with the expected attributes
+  (`email`, `firstName`, `lastName`, `usergroup`, plus Salesforce standards).
+- Server log (DEBUG on `de.hybris.platform.samlsinglesignon`,
+  `org.springframework.security`, `org.opensaml`): the failing run logged
+  `MissingMandatoryAttributesException: [email]`; the fixed run did **not**, and the
+  immediate follow-up request no longer logged `Cannot find user with uid ...`
+  (i.e. the customer now existed).
+- Flexible search confirms the row (note: `B2BCustomer` has **no `email` column** in
+  the query projection — select `uid`/`itemtype` only):
+  ```sql
+  SELECT {uid},{itemtype} FROM {User} WHERE {uid}='mario.fink@goodyear.com'
+  ```
 
 ---
 
@@ -220,9 +338,9 @@ Use this output to configure/verify the Salesforce side.
 
 ## 7. Open items still owned by later phases
 
-- **Phase 4** — JIT `B2BCustomer` creation & mapping. The OOTB `sso.mapping.*`
-  properties target `Employee`/ASM agents; storefront B2B customers need custom
-  mapping logic (assertion `email` → `B2BCustomer.uid`, assign to a B2B unit/group).
+- **Phase 4** — ✅ **DONE.** JIT `B2BCustomer` creation works end-to-end via the
+  `sso.mapping.*` config plus the `sfssocustom` email interceptor and the `Rustic`
+  B2BUnit membership. See section 5b for the full write-up.
 - **Phase 5** — SSO-only storefront: redirect the storefront login to the
   SP-initiated URL (`.../saml2/authenticate/registrationId`) and disable the native
   login form; wire logout to the SLO endpoint.

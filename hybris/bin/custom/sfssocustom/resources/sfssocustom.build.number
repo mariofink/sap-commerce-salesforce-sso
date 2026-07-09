@@ -1,0 +1,11 @@
+#Ant properties
+#Wed Jun 10 03:15:04 UTC 2026
+builddate=20260610 0314
+description=sfssocustom
+group.id=de.hybris.platform
+module.name=platform-module
+name=sfssocustom
+releasedate=20260610 0314
+vendor=hybris
+version=2211-jdk21.14
+version.api=2211-jdk21
