@@ -120,12 +120,17 @@ attribute `usergroup=b2bcustomer` (see values-and-checklist doc).
 default **B2BUnit** so full B2B storefront features (checkout, org management) work;
 OOTB B2B customers belong to a unit (e.g. "Custom Retail") plus `b2bcustomergroup`.
 
-### Phase 5 — Storefront integration (SSO-only)
+### Phase 5 — Storefront integration (SSO-only)  ✅ DONE (2026-07-10)
 1. Replace/redirect the storefront login page so it triggers the SP-initiated SAML
-   flow (no native username/password form — SSO-only).
-2. Handle post-login redirect back to the storefront account/landing page.
+   flow (no native username/password form — SSO-only). ✅
+2. Handle post-login redirect back to the storefront account/landing page. ✅
+   (`/saml/` cookie-handoff → `sso.redirect.url` → custom `SamlSsoLoginFilter`.)
 3. Handle **Single Logout (SLO)** — extension already wires `/saml/logout/**`;
-   point storefront logout at it.
+   point storefront logout at it. ⚠ config in place, end-to-end logout not yet verified.
+
+> Full write-up (flow, the cookie-handoff gotcha, why the custom filter, single-host
+> requirement, files/props, verification): see **section 5c** of
+> `salesforce-sso-values-and-checklist.md`.
 
 ### Phase 6 — Test & harden
 1. End-to-end test with a Salesforce sandbox user: login → JIT `B2BCustomer`

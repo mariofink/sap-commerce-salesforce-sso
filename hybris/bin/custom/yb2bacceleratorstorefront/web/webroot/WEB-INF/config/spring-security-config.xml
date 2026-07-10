@@ -92,6 +92,9 @@
 		<security:custom-filter after="CSRF_FILTER" ref="logoutFilter" />
 		<security:custom-filter before="FORM_LOGIN_FILTER" ref="preLoginCheckFilter" />
 
+		<!-- SAML SSO: auto-login from the samlsinglesignon pass-through cookie -->
+		<security:custom-filter before="ANONYMOUS_FILTER" ref="samlSsoLoginFilter" />
+
 		<!-- RememberMe -->
 		<security:remember-me key="yb2bacceleratorstorefront" services-ref="rememberMeServices" />
 
@@ -287,7 +290,9 @@
 
 	<alias name="defaultLogoutSuccessHandler" alias="logoutSuccessHandler"/>
 	<bean id="defaultLogoutSuccessHandler" class="de.hybris.platform.acceleratorstorefrontcommons.security.StorefrontLogoutSuccessHandler" >
-		<property name="defaultTargetUrl" value="/?logout=true"/>
+		<!-- SSO-only: after local storefront logout, redirect to the configured target. Default is a local
+		     redirect; set 'storefront.sso.logout.url=/samlsinglesignon/saml/logout' to trigger SAML single-logout. -->
+		<property name="defaultTargetUrl" value="#{configurationService.configuration.getString('storefront.sso.logout.url','/?logout=true')}"/>
 		<property name="guidCookieStrategy" ref="guidCookieStrategy"/>
 		<property name="useReferer" value="true"/>
 		<property name="restrictedPages" ref="logoutRestrictedPages"/>
@@ -336,6 +341,15 @@
 
 	<bean id="rememberMeAuthenticationProvider" class="org.springframework.security.authentication.RememberMeAuthenticationProvider" >
 		<constructor-arg name="key" value="yb2bacceleratorstorefront"/>
+	</bean>
+
+	<!-- SAML SSO: consumes the samlsinglesignon login-token cookie and logs the B2BCustomer into the storefront session -->
+	<bean id="samlSsoLoginFilter" class="de.hybris.platform.yb2bacceleratorstorefront.security.SamlSsoLoginFilter">
+		<property name="userDetailsService" ref="coreUserDetailsService" />
+		<property name="userService" ref="userService" />
+		<property name="customerFacade" ref="customerFacade" />
+		<property name="guidCookieStrategy" ref="guidCookieStrategy" />
+		<property name="rememberMeServices" ref="rememberMeServices" />
 	</bean>
 
 	<!-- CSRF -->

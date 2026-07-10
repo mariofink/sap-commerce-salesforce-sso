@@ -323,7 +323,120 @@ The interceptor requires no data model change, so no system update.
 
 ---
 
-## 6. Verifying the SP metadata endpoint (after Phase 3 config + server boot)
+## 5c. Phase 5 — SSO-only storefront login + JIT session (what it actually took) — COMPLETED ✅
+
+**Goal:** the `yb2bacceleratorstorefront` (powertools) storefront has no native
+username/password form. Hitting `/login` bounces the user to Salesforce; on return the
+user is logged into the storefront session as the JIT-provisioned `B2BCustomer`.
+
+### The end-to-end flow (as built)
+
+1. **Storefront `/login` (anonymous)** → `LoginPageController.doLogin` redirects to the
+   SP-initiated SAML URL. Because the endpoint lives in **another webapp**
+   (`/samlsinglesignon`), the redirect is built as an **absolute** `scheme://host:port/...`
+   URL (`buildAbsoluteSsoLoginUrl`). A context-relative `redirect:/...` would get the
+   storefront context path prepended and loop back to `/login`.
+2. **SP-init → Salesforce → ACS** `/samlsinglesignon/login/saml2/sso/registrationId`.
+   `Saml2WebSsoAuthenticationFilter` authenticates and immediately fires its success
+   handler, which **redirects and stops the filter chain**.
+3. **Success redirect → `/samlsinglesignon/saml/`** (via `sso.success.redirect.url=/saml/`;
+   the handler prepends the `/samlsinglesignon` context). On *this* follow-up request the
+   SAML auth is restored from session (`security-context-explicit-save="false"`), so it is
+   authenticated and the request reaches:
+   - **`saml2UserFilter`** (in the hybris `PlatformFilterChain`) → calls
+     `DefaultSamlLoginService.storeLoginToken` → `UserManager.storeLoginTokenCookie`
+     → writes the single-use **`samlPassThroughToken`** cookie (path `/`, Secure, 60s).
+   - **`RedirectionController`** (`@RequestMapping /saml/**`) → redirects to
+     **`sso.redirect.url`** = the storefront home.
+4. **Storefront home** (`/yb2bacceleratorstorefront/powertools/de/USD/`) → the custom
+   **`SamlSsoLoginFilter`** finds the `samlPassThroughToken` cookie, decodes it
+   (`new CookieBasedLoginToken(cookie)` → `token.getUser().getUid()`), and logs the user
+   into the storefront session. The single-use cookie is then erased.
+
+### The critical gotcha — where the cookie is created
+
+`saml2UserFilter` is the **only** thing that writes the pass-through cookie, and it runs
+**only on a `/samlsinglesignon/...` request that carries the SAML auth in session** — never
+on the ACS request itself (the SAML auth filter sends its success redirect and terminates
+the chain before the platform filter chain runs). Therefore the success redirect **must**
+target a samlsinglesignon URL first. Redirecting the ACS success **straight to the
+storefront** skips cookie creation entirely → the storefront filter never sees a cookie →
+infinite `login ⇄ Salesforce ⇄ storefront` loop. The fix is the two-hop
+`/saml/` → `sso.redirect.url` flow above (the OOTB `RedirectionController` is active in
+modern mode too — it is not gated by `sso.legacy.endpoints.enabled`).
+
+### Why a custom `SamlSsoLoginFilter` (not an OOTB consumer)
+
+The B2B accelerator storefront has **no** OOTB consumer for the `samlPassThroughToken`
+cookie (its `AcceleratorRememberMeServices` uses a different token format). The filter
+mirrors the ASM `AssistedServiceFilter` / `DefaultAutoLoginStrategy` pattern. Two subtle
+requirements learned the hard way:
+
+- **The authentication principal must be the username `String`, not the `UserDetails`
+  object.** `AcceleratorRememberMeServices.retrievePassword` does
+  `authentication.getPrincipal().toString()` and looks that up as a uid, exactly like the
+  platform `CoreAuthenticationProvider.createSuccessAuthentication` (which uses
+  `user.getUsername()`). Passing a `CoreUserDetails` object throws
+  `Cannot find user with uid 'CoreUserDetails[...]'`.
+- **Set the hybris session user explicitly** via
+  `userService.setCurrentUser(userService.getUserForUID(uid))` (the `AuthenticationManager`
+  is bypassed for SSO), then `SecurityContextHolder.setAuthentication`,
+  `customerFacade.loginSuccess()`, `guidCookieStrategy.setCookie`,
+  `rememberMeServices.loginSuccess(request, response, authentication)`.
+
+### Single-host requirement
+
+The powertools site is bound only to `powertools.local`
+(`website.powertools.https=https://powertools.local:9002/yb2bacceleratorstorefront`). SAML
+sessions and the `samlPassThroughToken` cookie are per-host, so the **entire** flow
+(storefront + samlsinglesignon + Salesforce ACS + `sso.redirect.url`) must use
+`powertools.local`. The Salesforce **ACS URL** was set to
+`https://powertools.local:9002/samlsinglesignon/login/saml2/sso/registrationId`
+accordingly. `sso.entity.id=urn:ssoextension:hybris:de` is a host-independent URN and is
+unchanged. The TLS cert on :9002 is `CN=localhost`, so the browser warns on
+`powertools.local` — accept it for the prototype.
+
+### Files / config that make up Phase 5
+
+| File | Purpose |
+|---|---|
+| `yb2bacceleratorstorefront/web/src/.../security/SamlSsoLoginFilter.java` | **NEW.** Consumes the `samlPassThroughToken` cookie and establishes the storefront session |
+| `yb2bacceleratorstorefront/web/src/.../controllers/pages/LoginPageController.java` | SSO-only: anonymous → absolute SP-init URL; authenticated → success redirect |
+| `yb2bacceleratorstorefront/web/webroot/WEB-INF/config/spring-security-config.xml` | Registers `samlSsoLoginFilter` (`before ANONYMOUS_FILTER`); configurable logout target |
+| `samlsinglesignon/web/webroot/WEB-INF/security/spring-security-config.xml` | OOTB edit: `successRedirectHandler` `defaultTargetUrl` → `${sso.success.redirect.url:/}` |
+| `config/local.properties` | `sso.success.redirect.url=/saml/`, `sso.redirect.url=<storefront home>`, `storefront.sso.login.url`, `storefront.sso.logout.url` |
+
+Key properties:
+
+```properties
+# ACS success → samlsinglesignon /saml/ (writes the samlPassThroughToken cookie via
+# saml2UserFilter), then RedirectionController forwards to sso.redirect.url.
+sso.success.redirect.url=/saml/
+sso.redirect.url=https://powertools.local:9002/yb2bacceleratorstorefront/
+# Storefront /login → SP-initiated SAML (no native form)
+storefront.sso.login.url=/samlsinglesignon/saml2/authenticate/registrationId
+storefront.sso.logout.url=/?logout=true
+```
+
+Build: `ant build` in `yb2bacceleratorstorefront` (Java changed). The samlsinglesignon XML
++ property changes need only a **restart**. Editing the OOTB `samlsinglesignon` webapp is
+acceptable for the prototype (it cannot be overridden from the storefront webapp — different
+Spring context); the change is config-driven via a property placeholder.
+
+### How Phase 5 success was verified
+
+- Browser: after Salesforce sign-in the user lands on the powertools storefront home,
+  **logged in** as the `B2BCustomer` (no redirect loop, no HAC).
+- Server log (INFO on `de.hybris.platform.yb2bacceleratorstorefront.security`):
+  ```
+  SamlSsoLoginFilter  SAML SSO cookie 'samlPassThroughToken' present on request to
+                      '/yb2bacceleratorstorefront/powertools/de/USD/' - attempting storefront login
+  SamlSsoLoginFilter  Established storefront SSO session for user 'mario.fink@goodyear.com'
+  ```
+
+---
+
+
 
 Once the Commerce server is running with the IdP metadata in place:
 
@@ -341,8 +454,9 @@ Use this output to configure/verify the Salesforce side.
 - **Phase 4** — ✅ **DONE.** JIT `B2BCustomer` creation works end-to-end via the
   `sso.mapping.*` config plus the `sfssocustom` email interceptor and the `Rustic`
   B2BUnit membership. See section 5b for the full write-up.
-- **Phase 5** — SSO-only storefront: redirect the storefront login to the
-  SP-initiated URL (`.../saml2/authenticate/registrationId`) and disable the native
-  login form; wire logout to the SLO endpoint.
+- **Phase 5** — ✅ **DONE.** SSO-only storefront login + JIT session established via the
+  custom `SamlSsoLoginFilter` and the `/saml/` → `sso.redirect.url` cookie-handoff flow.
+  See section 5c for the full write-up. Logout/SLO wiring is in place (config-driven) but
+  end-to-end logout is **not yet verified**.
 - **HTTPS on localhost** — Commerce ships a self-signed SSL cert on 9002; the browser
   must accept it. The SP keystore cert is `CN=localhost` (Phase 1).
