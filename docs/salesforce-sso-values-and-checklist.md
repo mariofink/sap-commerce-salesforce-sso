@@ -434,6 +434,82 @@ Spring context); the change is config-driven via a property placeholder.
   SamlSsoLoginFilter  Established storefront SSO session for user 'mario.fink@goodyear.com'
   ```
 
+### ⚠ Non-durable SSO artifacts — NOT tracked in git (must be restored after platform re-extraction)
+
+`.gitignore` ignores all of `/hybris/bin/modules/` (SAP-managed platform, line 13) **and**
+`hybris/config/local.properties` (line 49). As a result, several things this prototype
+depends on live **outside version control** and are **lost by any platform
+re-extraction / patch / upgrade / `ant clean` of the module tree**. They must be
+re-applied by hand (or by a setup script) afterwards. Decision (2026-07-10): for a
+localhost prototype we **accept this and rely on this document** as the record — we do
+*not* fork samlsinglesignon into a tracked extension.
+
+**Full inventory of non-durable items:**
+
+| # | Item | Location | Type | Purpose |
+|---|------|----------|------|---------|
+| 1 | `successRedirectHandler.defaultTargetUrl` = `${sso.success.redirect.url:/}` (OOTB was hardcoded `"/"`) | `bin/modules/platform/samlsinglesignon/web/webroot/WEB-INF/security/spring-security-config.xml` (~line 229) | **code edit** | Routes the post-ACS redirect to `/saml/` so the cookie-handoff (below) can run. Inert unless `sso.success.redirect.url` is set (defaults to `/`). |
+| 2 | `samlKeystore.jks` | `bin/modules/platform/samlsinglesignon/web/webroot/WEB-INF/security/` | **artifact** | SP signing/encryption keystore (alias `hybris`, pass `changeit`, `CN=localhost`). |
+| 3 | `metadata.xml` | `bin/modules/platform/samlsinglesignon/web/webroot/WEB-INF/security/` | **artifact** | Salesforce IdP SAML metadata (trust anchor). |
+| 4 | All `sso.*` / `storefront.sso.*` / `samlsinglesignon.*` properties | `hybris/config/local.properties` | **config** | Full SSO wiring (see §"local.properties" above). |
+
+Items 2–4 are inherent to how the samlsinglesignon extension resolves its keystore and
+metadata (paths relative to its own webapp), so they can't simply move into `bin/custom`.
+There is also no clean cross-extension override for the samlsinglesignon **web** Spring
+context, so item 1 is an unavoidable in-place patch.
+
+**What IS tracked in git (survives everything):** the storefront `SamlSsoLoginFilter`,
+`LoginPageController`, the storefront `spring-security-config.xml`, and the entire
+`bin/custom/sfssocustom` extension (Phase 4 B2BCustomer email interceptor).
+
+#### Restore checklist (run after any platform re-extraction)
+
+1. Copy `samlKeystore.jks` and `metadata.xml` back into
+   `bin/modules/platform/samlsinglesignon/web/webroot/WEB-INF/security/`
+   (keep known-good copies outside `bin/modules`, e.g. a backup dir or re-generate/re-download).
+2. Re-apply item 1: in that extension's `spring-security-config.xml`, change the
+   `successRedirectHandler` bean's `defaultTargetUrl` from `"/"` to `"${sso.success.redirect.url:/}"`.
+3. Confirm `hybris/config/local.properties` still contains the SSO block (it is gitignored
+   but not inside `bin/modules`, so only a fresh config wipe would remove it).
+4. Rebuild + restart: `ant build` then start the platform.
+
+### Logout — LOCAL-ONLY by design (true SAML SLO deliberately not implemented)
+
+**Decision:** logout clears the storefront (and Hybris) session only; the Salesforce IdP
+session is left intact. Consequence (accepted, and standard SSO behaviour): clicking login
+again re-uses the live Salesforce session and signs the user straight back in without a
+password prompt. Config: `storefront.sso.logout.url=/?logout=true` (a plain local redirect;
+the OOTB `StorefrontLogoutSuccessHandler` with `useReferer=true` handles the rest). **No OOTB
+edits, no rebuild** — logout lives entirely in tracked storefront/config.
+
+**Why true SAML Single Logout was dropped:** SLO would require the SP to POST a signed
+`LogoutRequest` to Salesforce. The signing keystore and the logout-request resolver live
+**inside the samlsinglesignon webapp's own Spring context**, so making the request
+Salesforce-acceptable requires patching that gitignored OOTB extension (or duplicating its
+entire signed-SAML stack in a webapp we own). Given the OOTB-modification cost, SLO was
+descoped for the prototype.
+
+**Investigation findings (kept for the future, in case SLO is revisited):** SLO *did* fire
+end-to-end and POST a correctly **signed** (RSA-SHA256, `CN=localhost` SP cert) `LogoutRequest`
+to Salesforce, but Salesforce returned a generic `SingleLogoutError` (no IdP event logged).
+Two defects were found in the OOTB samlsinglesignon logout request, both root-caused via
+SAML-tracer + decompiling `spring-security-saml2` and the extension:
+
+1. **Missing NameID `Format`.** Salesforce matches an SP-initiated `LogoutRequest` to a
+   session by NameID **value _and_ Format**. Login issued
+   `Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"`, but Spring's
+   `BaseOpenSamlLogoutRequestResolver` builds the logout NameID with a **value only** — no
+   Format — so Salesforce cannot match the session. (`nameId.setValue(authentication.getName())`
+   with no `setFormat(...)`.)
+2. **Duplicate `<SessionIndex>`.** Spring already copies the SessionIndex from the
+   authenticated principal; the extension's `parametersConsumer`
+   (`SamlObjectsFactory.adjustRequestResolverWithSessionIndex`) adds a second identical one.
+
+If SLO is ever required, the fix is to replace the resolver's `parametersConsumer` (in the
+samlsinglesignon web `spring-security-config.xml`) with one that stamps the NameID Format to
+match login and skips the redundant SessionIndex — but that is an **OOTB patch** and so was
+intentionally not shipped here.
+
 ---
 
 

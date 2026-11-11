@@ -125,8 +125,12 @@ OOTB B2B customers belong to a unit (e.g. "Custom Retail") plus `b2bcustomergrou
    flow (no native username/password form — SSO-only). ✅
 2. Handle post-login redirect back to the storefront account/landing page. ✅
    (`/saml/` cookie-handoff → `sso.redirect.url` → custom `SamlSsoLoginFilter`.)
-3. Handle **Single Logout (SLO)** — extension already wires `/saml/logout/**`;
-   point storefront logout at it. ⚠ config in place, end-to-end logout not yet verified.
+3. Handle **Single Logout (SLO)** — **descoped.** Logout is LOCAL-ONLY by design
+   (`storefront.sso.logout.url=/?logout=true`): the storefront session is cleared but the
+   Salesforce IdP session persists (so re-login is silent — standard SSO behaviour). True
+   SAML SLO was intentionally not implemented because it would require patching the OOTB
+   (gitignored) samlsinglesignon extension. See section 5c "Logout" for the full rationale
+   and the SLO investigation findings.
 
 > Full write-up (flow, the cookie-handoff gotcha, why the custom filter, single-host
 > requirement, files/props, verification): see **section 5c** of
@@ -159,6 +163,11 @@ OOTB B2B customers belong to a unit (e.g. "Custom Retail") plus `b2bcustomergrou
 
 ## Notes
 - This is a real, supported OOTB path; `samlsinglesignon` is already in the platform.
+- ⚠ **Non-durable artifacts:** the prototype depends on items in gitignored locations
+  (one in-place edit + the SP keystore + the IdP metadata under `bin/modules/...`, plus the
+  SSO block in `local.properties`) that are wiped by any platform re-extraction. Full
+  inventory + a restore checklist are in section "⚠ Non-durable SSO artifacts" of
+  `salesforce-sso-values-and-checklist.md`.
 - localhost prototype: Salesforce must be reachable from the same browser session;
   the ACS URL does not need to be publicly reachable by Salesforce servers for
   SP-initiated browser-POST SSO.
